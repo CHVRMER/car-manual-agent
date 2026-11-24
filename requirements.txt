@@ -1,0 +1,12 @@
+# step05 packages (Python 3.12) + pypdfium2, pandas
+streamlit==1.66.1
+langchain-aws==1.9.0
+langchain-core==1.7.0
+boto3[crt]==1.43.118
+awscrt==0.36.0
+python-dotenv==1.2.4
+langchain-text-splitters==1.1.3
+langchain-postgres==0.0.19
+psycopg[binary]==3.3.6
+pypdfium2
+pandas

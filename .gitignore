@@ -9,3 +9,8 @@ __pycache__/
 # 설명서 원본과 설명서 쪽 이미지 (제조사 저작물)
 *.pdf
 data/
+manuals/
+
+# 임시 파일
+*.part
+.DS_Store
