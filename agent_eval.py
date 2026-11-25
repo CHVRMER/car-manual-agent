@@ -123,7 +123,7 @@ def save_report(report: dict, directory: str = RESULTS_DIR, day: date | None = N
     folder = Path(directory)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{day.isoformat()}.csv"
-    with path.open("w", encoding="utf-8", newline="") as f:
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         writer.writeheader()
         writer.writerows(report["rows"])
