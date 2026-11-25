@@ -120,6 +120,8 @@ with reg_tab:
                                                  texts.get(p, ""))  # 쪽마다 따로 호출
                     except Exception as e:  # 한 쪽이 실패해도 나머지 쪽은 계속 읽음
                         st.warning(f"{p}쪽을 읽지 못했습니다: {type(e).__name__}. 이 쪽 행은 확인 단계에서 직접 추가하세요.")
+                        with st.expander(f"{p}쪽 오류 내용"):
+                            st.code(str(e)[:3000])
                         bar.progress((i + 1) / len(pages), text=f"{p}쪽: 실패")
                         continue
                     if res.rows:

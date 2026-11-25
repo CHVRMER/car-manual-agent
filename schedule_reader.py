@@ -7,9 +7,18 @@ from typing import Literal, Optional
 from dotenv import load_dotenv
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
+
+
+def _norm_table(v):
+    s = str(v or "")
+    if "가혹" in s:
+        return "가혹"
+    if "통상" in s or "일반" in s:
+        return "통상"
+    return "없음" if s else None
 
 
 class ScheduleRow(BaseModel):
@@ -29,10 +38,68 @@ class ScheduleRow(BaseModel):
     footnote: str = Field(default="", description="이 항목에 달린 각주 문장")
     raw_text: str = Field(default="", description="이 행의 주기 칸 원문 그대로")
 
+    # 모델이 형식을 조금 어겨도 버리지 않고 바로잡음 (검증 실패로 쪽 전체를 잃지 않도록)
+    @field_validator("section", mode="before")
+    @classmethod
+    def _section(cls, v):
+        return _norm_table(v) if _norm_table(v) in ("통상", "가혹") else None
+
+    @field_validator("interval_km", "interval_months", "first_km", "first_months", mode="before")
+    @classmethod
+    def _int(cls, v):
+        if v is None or isinstance(v, int):
+            return v
+        nums = re.findall(r"\d+", str(v).replace(",", ""))
+        return int(nums[0]) if nums else None
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _action(cls, v):
+        s = str(v or "")
+        if not s or "무" in s or "없" in s:
+            return "없음"
+        if "●" in s or "교체" in s:
+            return "교체"
+        if "○" in s or "점검" in s:
+            return "점검"
+        return v
+
+    @field_validator("schedule_type", mode="before")
+    @classmethod
+    def _stype(cls, v):
+        s = str(v or "").lower()
+        if s in ("distance", "daily", "condition_based", "none"):
+            return s
+        if "daily" in s or "일일" in s:
+            return "daily"
+        if "condition" in s or "수시" in s or "상태" in s:
+            return "condition_based"
+        if "none" in s or "무" in s or not s:
+            return "none"
+        return "distance"
+
+    @field_validator("severe_conditions", mode="before")
+    @classmethod
+    def _sev(cls, v):
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(x) for x in v)
+        return "" if v is None else str(v)
+
+    @field_validator("footnote", "raw_text", "applies_to", mode="before")
+    @classmethod
+    def _str(cls, v):
+        return "" if v is None else str(v)
+
 
 class SevereCondition(BaseModel):
     no: int
     condition: str
+
+    @field_validator("no", mode="before")
+    @classmethod
+    def _no(cls, v):
+        nums = re.findall(r"\d+", str(v))
+        return int(nums[0]) if nums else v
 
 
 class PageResult(BaseModel):
@@ -41,6 +108,11 @@ class PageResult(BaseModel):
     rows: list[ScheduleRow] = Field(default_factory=list)
     severe_conditions: list[SevereCondition] = Field(
         default_factory=list, description="이 쪽에 번호가 붙은 가혹 조건 목록이 있으면 번호와 문장")
+
+    @field_validator("table", mode="before")
+    @classmethod
+    def _table(cls, v):
+        return _norm_table(v)
 
 
 SYSTEM = """당신은 자동차 취급설명서의 정기 점검표를 표 데이터로 옮기는 작업자입니다.
