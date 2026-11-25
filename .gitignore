@@ -5,6 +5,7 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # 설명서 원본과 설명서 쪽 이미지 (제조사 저작물)
 *.pdf
