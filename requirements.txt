@@ -10,3 +10,4 @@ langchain-postgres==0.0.19
 psycopg[binary]==3.3.6
 pypdfium2
 pandas
+langgraph==1.2.24

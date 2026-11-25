@@ -1,7 +1,9 @@
-"""car-manual-agent 1일차: 설명서 등록(본문 저장 + 점검표 읽기·확인)과 점검표 읽기 정확도."""
+"""car-manual-agent: 설명서 등록(본문 저장 + 점검표 읽기·확인), 에이전트, 평가(AC-7 ~ AC-10)."""
 import csv
+import json
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -137,7 +139,7 @@ with reg_tab:
             if "rows" in st.session_state:
                 st.subheader("3. 확인하고 고치기")
                 st.caption("모델이 읽은 결과입니다. 이미지와 대조해 틀린 칸을 고친 뒤 저장하세요. 저장 전 값은 답변에 쓰지 않습니다.")
-                edited = st.data_editor(st.session_state["rows"], num_rows="dynamic", use_container_width=True,
+                edited = st.data_editor(st.session_state["rows"], num_rows="dynamic", width="stretch",
                                         key=f"editor_{mid}")
                 severe = st.session_state["severe"]
                 st.write("가혹 조건: 주로 이런 환경에서 운전하면 체크하세요")
@@ -166,9 +168,70 @@ with reg_tab:
                                      (",".join(map(str, chosen)), mid))
                     st.success(f"점검표 {len(edited)}행, 가혹 조건 {len(severe)}개 저장")
 
-# ---------------- 에이전트 (2일차) ----------------
+# ---------------- 에이전트 ----------------
+@st.cache_data(show_spinner=False)
+def page_image(manual_id: str, page: int) -> bytes:
+    return render_page_png((MANUAL_DIR / f"{manual_id}.pdf").read_bytes(), page, scale=1.3)
+
+
+def show_result(manual_id: str, res: dict):
+    """답, 근거 쪽 이미지(FR-8), 도구 호출 과정(FR-13)"""
+    st.markdown(res["answer"])
+    pages = res.get("pages") or []
+    if pages and (MANUAL_DIR / f"{manual_id}.pdf").exists():
+        cols = st.columns(min(len(pages), 4))
+        for col, p in zip(cols, pages[:4]):
+            col.image(page_image(manual_id, p), caption=f"PDF {p}쪽", width="stretch")
+    if res.get("tool_calls"):
+        with st.expander("도구 호출 과정"):
+            for c in res["tool_calls"]:
+                st.markdown(f"**{c['name']}** `{json.dumps(c['args'], ensure_ascii=False)}`")
+                st.code(str(c["output"])[:2000])
+
+
 with agent_tab:
-    st.info("2일차에 도구 4개와 LangGraph 에이전트를 붙입니다.")
+    if not current:
+        st.info("설명서 등록 탭에서 설명서를 먼저 올려 주세요.")
+    else:
+        if not dict((m[0], m[4]) for m in manuals).get(current):
+            st.warning("이 설명서는 점검표를 아직 확인·저장하지 않았습니다. 정비 주기 질문에는 답할 수 없습니다 (R-4).")
+        hist = st.session_state.setdefault(f"chat_{current}", [])
+        for m in hist:
+            with st.chat_message(m["role"]):
+                if m["role"] == "assistant":
+                    show_result(current, m["res"])
+                else:
+                    st.markdown(m["content"])
+        q = st.chat_input("설명서에 대해 물어보세요. 예: 엔진오일은 얼마마다 갈아?")
+        if q:
+            with st.chat_message("user"):
+                st.markdown(q)
+            with st.chat_message("assistant"):
+                try:
+                    from agent import run_agent
+                    with st.spinner("설명서를 찾는 중..."):
+                        res = run_agent(current, q, history=[{"role": m["role"], "content": m["content"]} for m in hist])
+                except Exception as e:
+                    st.error(f"에이전트 실행 중 오류: {type(e).__name__}: {str(e)[:500]}")
+                    res = None
+                if res:
+                    show_result(current, res)
+            if res:
+                hist += [{"role": "user", "content": q},
+                         {"role": "assistant", "content": res["answer"], "res": res}]
+        if hist and st.button("대화 지우기"):
+            st.session_state[f"chat_{current}"] = []
+            st.rerun()
+
+        st.divider()
+        st.subheader("내 정비 기록")
+        with connect() as conn:
+            recs = conn.execute("SELECT item, done_date, mileage FROM my_maintenance WHERE manual_id=%s "
+                                "ORDER BY done_date DESC, id DESC", (current,)).fetchall()
+        if recs:
+            st.dataframe(pd.DataFrame(recs, columns=["항목", "날짜", "주행거리(km)"]), width="stretch")
+        else:
+            st.caption("아직 기록이 없습니다. 예: \"오늘 엔진오일 갈았어. 30,000km야. 기록해 줘\"")
 
 # ---------------- 평가 ----------------
 with eval_tab:
@@ -189,4 +252,53 @@ with eval_tab:
             else:
                 res = compare(truth, pred)
                 st.write({k: v for k, v in res.items() if k != "details"})
-                st.dataframe(pd.DataFrame(res["details"]), use_container_width=True)
+                st.dataframe(pd.DataFrame(res["details"]), width="stretch")
+
+    st.divider()
+    st.subheader("AC-8 ~ AC-10 에이전트 평가")
+    st.caption("eval/eval_questions.csv의 질문 15개를 사이드바에서 고른 설명서로 실행합니다. "
+               "setup 기록은 평가 동안만 넣고, 평가 중에 생긴 기록과 함께 끝나면 지웁니다.")
+    cur_name = dict((m[0], m[1]) for m in manuals).get(current) if current else None
+    if cur_name and cur_name != "CN8_2027":
+        st.warning(f"평가 질문은 아반떼(CN8_2027) 기준입니다. 지금 고른 설명서는 {cur_name}입니다.")
+    if current and st.button("에이전트 평가 실행 (질문 15개, 몇 분 걸림)"):
+        from agent import build_graph, make_tools, run_agent
+        from agent_eval import format_summary, load_questions, parse_setup, save_report, score
+        questions = load_questions(str(BASE / "eval" / "eval_questions.csv"))
+        with connect() as conn:
+            max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM my_maintenance").fetchone()[0]
+        results = []
+        bar = st.progress(0.0)
+        try:
+            with connect() as conn:  # setup 기록 넣기 (q08, q09)
+                for qq in questions:
+                    sp = parse_setup(qq.get("setup"))
+                    if sp:
+                        conn.execute("INSERT INTO my_maintenance (manual_id, item, done_date, mileage) VALUES "
+                                     "(%s,%s,%s,%s) ON CONFLICT (manual_id, item, done_date) DO NOTHING",
+                                     (current, *sp))
+            tools, info = make_tools(current)
+            graph = build_graph(tools, info)
+            for i, qq in enumerate(questions):
+                try:
+                    res = run_agent(current, qq["question"], graph=graph)
+                except Exception as e:
+                    res = {"answer": f"오류: {type(e).__name__}: {e}", "tools": [], "pages": [], "tool_calls": []}
+                results.append({"id": qq["id"], **res})
+                bar.progress((i + 1) / len(questions), text=f"{qq['id']} 완료")
+        finally:
+            with connect() as conn:  # 평가 동안 생긴 기록 지우기
+                conn.execute("DELETE FROM my_maintenance WHERE manual_id=%s AND id > %s", (current, max_id))
+        out_dir = BASE / "eval" / "agent_results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{date.today().isoformat()}.json").write_text(
+            json.dumps(results, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        report = score(questions, results)
+        path = save_report(report, directory=str(out_dir))
+        st.text(format_summary(report))
+        st.dataframe(pd.DataFrame(report["rows"]), width="stretch")
+        st.write("답 확인 (정답 문장과 사람이 비교)")
+        st.dataframe(pd.DataFrame([{"id": q["id"], "질문": q["question"], "정답": q["reference_answer"],
+                                    "에이전트 답": r["answer"]} for q, r in zip(questions, results)]),
+                     width="stretch")
+        st.caption(f"저장: {path}, 같은 폴더의 .json")
