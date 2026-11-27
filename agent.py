@@ -23,6 +23,7 @@ load_dotenv()
 
 KST = timezone(timedelta(hours=9))
 R6 = "취급설명서에서 찾을 수 없는 내용입니다."
+MAX_PAGES = 4  # 근거 이미지 최대 장수 (화면과 AC-9 공통)
 SCHEDULE_COLS = ["page", "section", "item", "applies_to", "action", "schedule_type", "interval_km",
                  "interval_months", "first_km", "first_months", "severe_conditions", "raw_text"]
 
@@ -118,7 +119,7 @@ def make_tools(manual_id: str):
     def search_manual(query: str):
         """취급설명서 본문을 검색한다. 기능 사용법, 경고등, 경고, 주의사항, 타이어 공기압, 비상 조치처럼
         설명서 본문에 있는 내용을 물을 때 쓴다. query에는 설명서에 나올 법한 단어를 넣는다."""
-        docs = get_store().similarity_search(query, k=4, filter={"manual_id": manual_id})
+        docs = get_store().similarity_search(query, k=6, filter={"manual_id": manual_id})
         if not docs:
             return f"검색 결과가 없습니다. 이 경우 '{R6}'라고 답한다.", []
         pages = []
@@ -229,16 +230,26 @@ def system_prompt(info: dict) -> str:
 - "기록해 줘", "갈았어" → add_maintenance
 - "마지막으로 언제 갈았어?" → list_maintenance
 - 중고 시세, 정비소 추천, 다른 차와 비교처럼 설명서와 정비 기록으로 답할 수 없는 질문은 도구를 부르지 말고
-  "{R6}"라고만 답합니다.
+  "{R6}"라고만 답합니다. 이때 답 전체가 이 한 문장이어야 합니다.
+  다른 사이트, 앱, 서비스, 회사, 매장을 안내하거나 추천하지 않습니다.
 
 답하는 규칙
 1. 도구 결과에 있는 숫자(거리, 기간, 압력, 용량)만 씁니다. 숫자를 만들어 내지 않습니다.
 2. 다음 정비 시점은 직접 계산하지 말고 maintenance_info 결과의 '다음 시점'을 그대로 씁니다.
-3. 주기를 말할 때는 통상 조건을 먼저 말하고, 가혹 조건 주기가 있으면 해당 운행 조건 문장과 함께 덧붙입니다.
-4. 검색 결과에 답이 없으면 "{R6}"라고 답합니다.
-5. 경고등, 브레이크, 타이어처럼 안전과 관련된 답에는 "증상이 계속되면 서비스센터 점검을 받으세요."를 붙이고,
-   "계속 달려도 된다"고 단정하지 않습니다.
+3. 주기를 말할 때는 통상 조건 주기를 먼저 말하고, 가혹 조건 주기가 있으면 함께 말합니다.
+   그다음 도구 결과의 '사용자가 체크한 조건'이 그 항목의 운행 조건과 겹치면 "체크하신 조건(…)에
+   해당하므로 가혹 조건 주기를 따르세요"라고 말합니다. 겹치지 않으면 통상 주기를 따르라고 말합니다.
+4. 공기압, 용량처럼 숫자를 묻는데 검색 결과에 그 숫자가 없으면, 설명서 표에 나올 법한 말
+   (예: "추천 공기압 kPa", "타이어 및 휠 규격", "용량 L")로 search_manual을 한 번 더 부릅니다.
+   그래도 없으면 "{R6}"라고 답합니다.
+4-1. 검색 결과의 표에 타이어 규격, 트림, 엔진처럼 사양에 따라 값이 여러 개 있으면 하나만 고르지 말고
+   사양별로 모두 나열합니다. 표의 단위도 그대로 씁니다 (예: 240 kPa(35 psi)).
+5. 경고등이 켜졌거나 이상 증상(소음, 떨림, 누유, 제동 이상)을 묻는 답에만 "증상이 계속되면
+   서비스센터 점검을 받으세요."를 붙이고, "계속 달려도 된다"고 단정하지 않습니다.
+   정비 주기나 사용법을 묻는 답에는 붙이지 않습니다.
 6. 쉬운 한국어 존댓말로 짧게 답합니다. 부품 이름은 설명서에 적힌 그대로 씁니다.
+   이모지, 느낌표, '고객님' 같은 호칭을 쓰지 않습니다. 굵게 표시(**)와 구분선(---)도 쓰지 않습니다.
+   여러 값을 비교할 때만 표를 쓰고, 그 밖에는 5문장 이내로 답합니다.
 7. 쪽 번호는 답에 쓰지 않아도 됩니다. 근거 쪽 이미지는 화면이 따로 보여 줍니다."""
 
 
@@ -259,6 +270,26 @@ def build_graph(tools, info):
     g.add_conditional_edges("model", tools_condition)
     g.add_edge("tools", "model")
     return g.compile()
+
+
+def pick_pages(groups: list[list[int]], per_call: int = 2, limit: int = MAX_PAGES) -> list[int]:
+    """근거 이미지로 보여 줄 쪽 고르기.
+    groups: 도구 호출 순서대로, 각 호출이 돌려준 쪽 번호 (검색 점수 순).
+    1) 나중 호출부터 각 호출의 상위 per_call쪽씩 먼저 고른다
+       - 다시 검색한 경우: 나중 검색이 더 정확하므로 앞에 둔다
+       - 두 주제를 따로 검색한 비교 질문: 두 검색의 상위 쪽이 모두 들어간다
+    2) 남는 자리는 나중 호출의 나머지 쪽으로 채운다.
+    화면이 보여 주는 장수(limit)만큼만 돌려줘서 AC-9가 실제로 보인 쪽으로 채점되게 한다."""
+    pages: list[int] = []
+    for g in reversed(groups):
+        for p in g[:per_call]:
+            if p not in pages:
+                pages.append(p)
+    for g in reversed(groups):
+        for p in g[per_call:]:
+            if p not in pages:
+                pages.append(p)
+    return pages[:limit]
 
 
 _THINK = re.compile(r"<thinking>.*?</thinking>", re.S)
@@ -289,7 +320,7 @@ def run_agent(manual_id: str, question: str, history: Optional[list] = None, gra
     out = graph.invoke({"messages": msgs}, config={"recursion_limit": 10})
     new = out["messages"][n_before:]
 
-    calls, outputs, pages = [], {}, []
+    calls, outputs, groups = [], {}, []
     for m in new:
         if isinstance(m, AIMessage):
             for tc in m.tool_calls:
@@ -297,9 +328,8 @@ def run_agent(manual_id: str, question: str, history: Optional[list] = None, gra
         elif isinstance(m, ToolMessage):
             outputs[m.tool_call_id] = m.content
             if m.name in ("search_manual", "maintenance_info") and m.artifact:
-                for p in m.artifact:
-                    if p not in pages:
-                        pages.append(p)
+                groups.append(list(m.artifact))
+    pages = pick_pages(groups)
     for c in calls:
         c["output"] = outputs.get(c.pop("id"), "")
     final = next((m for m in reversed(new) if isinstance(m, AIMessage) and not m.tool_calls), None)

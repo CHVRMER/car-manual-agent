@@ -3,7 +3,7 @@ import csv
 import json
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -31,18 +31,10 @@ STYLE = f"""
 <style>
 [data-testid="stSidebarCollapseButton"] {{ display: none !important; }}
 
-/* 실행 중: 상단 상태 아이콘 대신 화면 중앙에 원형 로딩 (짧은 재실행은 0.3초 지연으로 깜빡이지 않게) */
+/* 실행 중 표시: 화면 전체를 덮는 로딩은 쓰지 않는다. 오래 걸리는 작업은 각자 진행 막대·말풍선 로딩을 보여 준다 */
 [data-testid="stStatusWidget"]:has([data-testid="stStatusWidgetRunningIcon"]) {{ visibility: hidden; }}
-@keyframes cma-spin {{ to {{ transform: rotate(360deg); }} }}
-@keyframes cma-fade {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
-body:has([data-testid="stStatusWidgetRunningIcon"])::after {{
-  content: ""; position: fixed; top: 50%; left: 50%; z-index: 1000000; pointer-events: none;
-  width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%;
-  border: 5px solid rgba(27, 42, 89, 0.15); border-top-color: {NAVY};
-  animation: cma-spin 0.8s linear infinite, cma-fade 0.2s ease 0.3s both;
-}}
-body:has(.cma-streaming)::after {{ display: none; }}
-[data-testid="stElementContainer"]:has(.cma-streaming) {{ display: none; }}
+/* 다시 그리는 동안 화면이 흐려지지 않게 */
+[data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
 
 /* 첫 질문 전: 입력창 위에 위아래로 움직이는 안내 말풍선. 입력창을 누르면 사라진다 */
 [data-testid="stElementContainer"]:has(.cma-hint) {{ display: none; }}
@@ -66,7 +58,10 @@ body:has(.cma-hint) [data-testid="stChatInput"]::after {{
   border-color: {NAVY} transparent transparent transparent;
 }}
 body:has(.cma-hint) [data-testid="stChatInput"]:focus-within::before,
-body:has(.cma-hint) [data-testid="stChatInput"]:focus-within::after {{ display: none; }}
+body:has(.cma-hint) [data-testid="stChatInput"]:focus-within::after,
+body.cma-hint-dismissed [data-testid="stChatInput"]::before,
+body.cma-hint-dismissed [data-testid="stChatInput"]::after {{ display: none; }}
+[data-testid="stElementContainer"]:has(iframe[srcdoc*="cma-hint-dismissed"]) {{ display: none; }}
 
 [data-testid="stSidebarUserContent"] {{ padding-top: 0; margin-top: -3.6rem; }}
 [data-testid="stSidebar"] .st-key-brand {{ margin-bottom: 0.6rem; }}
@@ -138,13 +133,34 @@ body:has(.cma-hint) [data-testid="stChatInput"]:focus-within::after {{ display: 
 
 st.set_page_config(page_title="Car Manual Agent", layout="wide")
 st.markdown(STYLE, unsafe_allow_html=True)
-make_tables()
 
 
+@st.cache_resource(show_spinner=False)
+def init_db():
+    make_tables()  # 서버가 켜진 뒤 한 번만 (매 클릭마다 DB에 가지 않게)
+    return True
+
+
+init_db()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def list_manuals():
+    """설명서 목록. 등록·저장 때 list_manuals.clear()로 새로 읽는다"""
     with connect() as conn:
         return conn.execute("SELECT manual_id, name, car_model, powertrain, schedule_confirmed, pages "
                             "FROM manuals ORDER BY uploaded_at DESC").fetchall()
+
+
+@st.cache_resource(show_spinner=False)
+def pdf_bytes(manual_id: str) -> bytes:
+    """원본 PDF (수십 MB)를 클릭마다 다시 읽지 않게 메모리에 둔다"""
+    return (MANUAL_DIR / f"{manual_id}.pdf").read_bytes()
+
+
+@st.cache_data(show_spinner=False)
+def preview_image(manual_id: str, page: int) -> bytes:
+    return render_page_png(pdf_bytes(manual_id), page, scale=1.0)
 
 
 def add_in_batches(docs, ids, bar, batch=100, retries=3):
@@ -170,7 +186,7 @@ def select(manual_id, view="chat"):
 
 @st.cache_data(show_spinner=False)
 def page_image(manual_id: str, page: int) -> bytes:
-    return render_page_png((MANUAL_DIR / f"{manual_id}.pdf").read_bytes(), page, scale=1.3)
+    return render_page_png(pdf_bytes(manual_id), page, scale=1.3)
 
 
 def words(text: str, delay: float = 0.04):
@@ -183,10 +199,7 @@ def words(text: str, delay: float = 0.04):
 def show_result(manual_id: str, res: dict, stream: bool = False):
     """답, 근거 쪽 이미지(FR-8), 도구 호출 과정(FR-13). stream이면 답을 어절 단위로 흘려 보여 준다"""
     if stream:
-        marker = st.empty()  # 답이 흘러나오는 동안 가운데 로딩 원을 숨긴다
-        marker.markdown('<span class="cma-streaming"></span>', unsafe_allow_html=True)
         st.write_stream(words(res["answer"]))
-        marker.empty()
     else:
         st.markdown(res["answer"])
     pages = res.get("pages") or []
@@ -199,6 +212,30 @@ def show_result(manual_id: str, res: dict, stream: bool = False):
             for c in res["tool_calls"]:
                 st.markdown(f"**{c['name']}** `{json.dumps(c['args'], ensure_ascii=False)}`")
                 st.code(str(c["output"])[:2000])
+
+
+HINT_JS = """
+<script>
+(() => {
+  const w = window.parent, doc = w.document, KEY = "cma-hint-dismissed";
+  const dismiss = () => {
+    doc.body.classList.add(KEY);
+    try { w.sessionStorage.setItem(KEY, "1"); } catch (e) {}
+  };
+  try { if (w.sessionStorage.getItem(KEY)) doc.body.classList.add(KEY); } catch (e) {}
+  if (w.__cmaHintBound) return;
+  w.__cmaHintBound = true;
+  const onInput = (e) => e.target.closest && e.target.closest('[data-testid="stChatInput"]') && dismiss();
+  doc.addEventListener("focusin", onInput, true);
+  doc.addEventListener("pointerdown", onInput, true);
+})();
+</script>
+"""
+
+
+def hint_script():
+    """입력창을 한 번이라도 누르면 안내 말풍선을 이 탭에서 다시 보이지 않게 한다 (CSS만으로는 기억할 수 없음)"""
+    st.iframe(HINT_JS, height=1)  # 보이지 않는 칸 (CSS로 숨김)
 
 
 # ---------------- 설명서 올리기 (첫 화면) ----------------
@@ -231,17 +268,19 @@ def upload_view():
                     conn.execute("INSERT INTO manuals (manual_id, name, car_model, powertrain, file_name, pages, chunks) "
                                  "VALUES (%s,%s,%s,%s,%s,%s,%s)",
                                  (mid, name, car_model, powertrain, up.name, len(pages), len(docs)))
+                list_manuals.clear()
             select(mid)
             st.rerun()
 
 
 # ---------------- 정기 점검표 읽기·확인 ----------------
+@st.fragment  # 쪽 번호·미리 보기 조작은 이 패널만 다시 그린다
 def schedule_panel(mid: str, reg_name: str):
     pdf_path = MANUAL_DIR / f"{mid}.pdf"
     if not pdf_path.exists():
         st.warning("원본 PDF가 이 서버에 없습니다. 같은 파일을 다시 올려 주세요.")
         return
-    data = pdf_path.read_bytes()
+    data = pdf_bytes(mid)
     if st.session_state.get("range_for") != mid:
         st.session_state["range"] = find_schedule_pages(read_pages(data))
         st.session_state["range_for"] = mid
@@ -251,10 +290,11 @@ def schedule_panel(mid: str, reg_name: str):
     end = c2.number_input("점검표 끝 쪽", 1, 2000, e0, key=f"end_{mid}")
     if st.toggle("후보 쪽 미리 보기", key=f"preview_{mid}"):
         for p in range(int(start), int(end) + 1):
-            st.image(render_page_png(data, p, scale=1.0), caption=f"PDF {p}쪽")
+            st.image(preview_image(mid, p), caption=f"PDF {p}쪽")
 
     rows_key, severe_key = f"rows_{mid}", f"severe_{mid}"
-    if st.button("점검표 읽기 (Claude Haiku 4.5)", key=f"read_{mid}"):
+    flash_key = f"saved_{mid}"
+    if st.button("점검표 읽기", key=f"read_{mid}"):
         from schedule_reader import read_schedule_page
         rows, severe = [], {}
         bar = st.progress(0.0)
@@ -283,34 +323,45 @@ def schedule_panel(mid: str, reg_name: str):
     if rows_key in st.session_state:
         st.markdown("**확인하고 고치기**")
         st.caption("모델이 읽은 결과입니다. 이미지와 대조해 틀린 칸을 고친 뒤 저장하세요. 저장 전 값은 답변에 쓰지 않습니다.")
-        edited = st.data_editor(st.session_state[rows_key], num_rows="dynamic", width="stretch",
-                                key=f"editor_{mid}")
         severe = st.session_state[severe_key]
-        st.write("가혹 조건: 주로 이런 환경에서 운전하면 체크하세요")
-        chosen = [no for no, (_, text) in sorted(severe.items())
-                  if st.checkbox(f"{no}. {text}", key=f"sev_{mid}_{no}")]
-        if not severe:
-            st.info("가혹 조건 문장 목록을 찾지 못했습니다. 점검표 범위에 가혹 조건 쪽이 들어 있는지 확인하세요.")
-        if st.button("확인하고 저장", key=f"save_{mid}"):
-            with connect() as conn:
+        with st.form(key=f"confirm_{mid}", border=False):  # 표 편집·체크는 저장을 누를 때 한 번에 반영
+            edited = st.data_editor(st.session_state[rows_key], num_rows="dynamic", width="stretch",
+                                    key=f"editor_{mid}")
+            st.write("가혹 조건: 주로 이런 환경에서 운전하면 체크하세요")
+            chosen = [no for no, (_, text) in sorted(severe.items())
+                      if st.checkbox(f"{no}. {text}", key=f"sev_{mid}_{no}")]
+            if not severe:
+                st.info("가혹 조건 문장 목록을 찾지 못했습니다. 점검표 범위에 가혹 조건 쪽이 들어 있는지 확인하세요.")
+            submitted = st.form_submit_button("확인하고 저장")
+        if st.session_state.get(flash_key):  # 저장 직후: 버튼 바로 아래에 결과
+            msg = st.session_state.pop(flash_key)
+            st.success(msg)
+            st.toast(msg, icon=":material/check_circle:")
+        if submitted:
+            rows = []
+            for r in edited.to_dict("records"):
+                vals = []
+                for c in COLS:
+                    v = r.get(c)
+                    if v is None or (not isinstance(v, str) and pd.isna(v)):
+                        v = None
+                    elif isinstance(v, float) and v.is_integer():
+                        v = int(v)  # data_editor가 빈칸 때문에 정수를 실수로 바꿈
+                    vals.append(v)
+                rows.append([mid] + vals)
+            with st.spinner(f"점검표 {len(rows)}행을 저장하는 중..."), connect() as conn:
                 conn.execute("DELETE FROM maintenance_schedule WHERE manual_id=%s", (mid,))
                 conn.execute("DELETE FROM severe_conditions WHERE manual_id=%s", (mid,))
-                for r in edited.to_dict("records"):
-                    vals = []
-                    for c in COLS:
-                        v = r.get(c)
-                        if v is None or (not isinstance(v, str) and pd.isna(v)):
-                            v = None
-                        elif isinstance(v, float) and v.is_integer():
-                            v = int(v)  # data_editor가 빈칸 때문에 정수를 실수로 바꿈
-                        vals.append(v)
-                    conn.execute(f"INSERT INTO maintenance_schedule (manual_id, {', '.join(COLS)}) "
-                                 f"VALUES (%s, {', '.join(['%s'] * len(COLS))})", [mid] + vals)
-                for no, (p, text) in severe.items():
-                    conn.execute("INSERT INTO severe_conditions VALUES (%s,%s,%s,%s)", (mid, no, p, text))
+                with conn.cursor() as cur:  # 한 줄씩 왕복하지 않고 묶어서 보냄 (터널 너머 DB라 차이가 큼)
+                    cur.executemany(f"INSERT INTO maintenance_schedule (manual_id, {', '.join(COLS)}) "
+                                    f"VALUES (%s, {', '.join(['%s'] * len(COLS))})", rows)
+                    cur.executemany("INSERT INTO severe_conditions VALUES (%s,%s,%s,%s)",
+                                    [(mid, no, p, text) for no, (p, text) in severe.items()])
                 conn.execute("UPDATE manuals SET schedule_confirmed=TRUE, severe_selected=%s WHERE manual_id=%s",
                              (",".join(map(str, chosen)), mid))
-            st.success(f"점검표 {len(edited)}행, 가혹 조건 {len(severe)}개 저장")
+            st.session_state[flash_key] = f"점검표 {len(edited)}행, 가혹 조건 {len(severe)}개 저장"
+            list_manuals.clear()
+            st.rerun()  # 사이드바의 '점검표 미확인' 표시와 경고를 바로 갱신
 
 
 def maintenance_records(mid: str):
@@ -395,7 +446,8 @@ def eval_view(manuals):
     st.divider()
     st.subheader("AC-8 ~ AC-10 에이전트 평가")
     st.caption("eval/eval_questions.csv의 질문 15개를 고른 설명서로 실행합니다. "
-               "setup 기록은 평가 동안만 넣고, 평가 중에 생긴 기록과 함께 끝나면 지웁니다.")
+               "평가 동안에는 내 정비 기록을 잠시 비우고, 질문마다 그 질문의 setup 기록만 넣었다가 지웁니다. "
+               "끝나면 원래 기록을 되돌립니다.")
     if not manuals:
         st.info("등록된 설명서가 없습니다.")
         return
@@ -409,36 +461,54 @@ def eval_view(manuals):
         from agent import build_graph, make_tools, run_agent
         from agent_eval import format_summary, load_questions, parse_setup, save_report, score
         questions = load_questions(str(BASE / "eval" / "eval_questions.csv"))
+        out_dir = BASE / "eval" / "agent_results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M")  # 같은 날 여러 번 돌려도 덮어쓰지 않게
+
+        # 1) 내 정비 기록 백업 (평가는 기록이 없는 같은 조건에서 반복 측정해야 비교할 수 있음)
         with connect() as conn:
-            max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM my_maintenance").fetchone()[0]
+            backup = conn.execute("SELECT item, done_date, mileage FROM my_maintenance WHERE manual_id=%s "
+                                  "ORDER BY id", (current,)).fetchall()
+        (out_dir / f"{stamp}_records_backup.json").write_text(  # 도중에 앱이 꺼져도 되살릴 수 있게
+            json.dumps([list(r) for r in backup], ensure_ascii=False, default=str), encoding="utf-8")
+
+        def clear_records():
+            with connect() as conn:
+                conn.execute("DELETE FROM my_maintenance WHERE manual_id=%s", (current,))
+
         results = []
-        bar = st.progress(0.0)
+        bar = st.progress(0.0, text="평가 준비")
         try:
-            with connect() as conn:  # setup 기록 넣기 (q08, q09)
-                for qq in questions:
-                    sp = parse_setup(qq.get("setup"))
-                    if sp:
-                        conn.execute("INSERT INTO my_maintenance (manual_id, item, done_date, mileage) VALUES "
-                                     "(%s,%s,%s,%s) ON CONFLICT (manual_id, item, done_date) DO NOTHING",
-                                     (current, *sp))
+            clear_records()
             tools, info = make_tools(current)
             graph = build_graph(tools, info)
             for i, qq in enumerate(questions):
+                sp = parse_setup(qq.get("setup"))
+                if sp:  # 2) 이 질문의 setup만 넣고
+                    with connect() as conn:
+                        conn.execute("INSERT INTO my_maintenance (manual_id, item, done_date, mileage) "
+                                     "VALUES (%s,%s,%s,%s)", (current, *sp))
                 try:
                     res = run_agent(current, qq["question"], graph=graph)
                 except Exception as e:
                     res = {"answer": f"오류: {type(e).__name__}: {e}", "tools": [], "pages": [], "tool_calls": []}
+                finally:
+                    clear_records()  # 3) 다음 질문에 섞이지 않게 바로 지움 (q10이 남긴 기록 포함)
                 results.append({"id": qq["id"], **res})
                 bar.progress((i + 1) / len(questions), text=f"{qq['id']} 완료")
         finally:
-            with connect() as conn:  # 평가 동안 생긴 기록 지우기
-                conn.execute("DELETE FROM my_maintenance WHERE manual_id=%s AND id > %s", (current, max_id))
-        out_dir = BASE / "eval" / "agent_results"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f"{date.today().isoformat()}.json").write_text(
+            # 4) 원래 기록 되돌리기 (오류가 나도 실행)
+            with connect() as conn:
+                conn.execute("DELETE FROM my_maintenance WHERE manual_id=%s", (current,))
+                if backup:
+                    with conn.cursor() as cur:
+                        cur.executemany("INSERT INTO my_maintenance (manual_id, item, done_date, mileage) "
+                                        "VALUES (%s,%s,%s,%s)", [(current, *r) for r in backup])
+        (out_dir / f"{stamp}.json").write_text(
             json.dumps(results, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         report = score(questions, results)
-        path = save_report(report, directory=str(out_dir))
+        path = Path(save_report(report, directory=str(out_dir)))
+        path = path.replace(out_dir / f"{stamp}.csv")
         st.text(format_summary(report))
         st.dataframe(pd.DataFrame(report["rows"]), width="stretch")
         st.write("답 확인 (정답 문장과 사람이 비교)")
@@ -481,6 +551,7 @@ else:
     hint = st.empty()
     if not st.session_state.get(f"chat_{current}"):
         hint.markdown('<span class="cma-hint"></span>', unsafe_allow_html=True)
+        hint_script()
 
 q = st.chat_input("설명서에 대해 물어보세요. 예: 엔진오일은 얼마마다 갈아?" if current
                   else "설명서를 먼저 등록하면 질문할 수 있습니다.",

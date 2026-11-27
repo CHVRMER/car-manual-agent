@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+.DS_Store
+data/
+manuals/
+*.pdf
+*.part
+eval/agent_results/
+*_export*.csv
+teammate_tasks*.md
+*.png
