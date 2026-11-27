@@ -424,7 +424,7 @@ def answer(mid: str, q: str):
 
 # ---------------- 평가 ----------------
 def eval_view(manuals):
-    st.subheader("AC-7 점검표 읽기 정확도")
+    st.subheader("점검표 추출 정확도")
     st.caption("모델이 읽은 그대로의 결과(eval/extracted/설명서이름.csv)를 정답 CSV와 비교합니다. 사용자가 고친 값은 쓰지 않습니다.")
     files = sorted(p.stem for p in EXTRACT_DIR.glob("*.csv"))
     if not files:
@@ -444,7 +444,7 @@ def eval_view(manuals):
                 st.dataframe(pd.DataFrame(res["details"]), width="stretch")
 
     st.divider()
-    st.subheader("AC-8 ~ AC-10 에이전트 평가")
+    st.subheader("에이전트 평가: 도구 선택 · 근거 쪽 · 범위 밖 거절")
     st.caption("eval/eval_questions.csv의 질문 15개를 고른 설명서로 실행합니다. "
                "평가 동안에는 내 정비 기록을 잠시 비우고, 질문마다 그 질문의 setup 기록만 넣었다가 지웁니다. "
                "끝나면 원래 기록을 되돌립니다.")

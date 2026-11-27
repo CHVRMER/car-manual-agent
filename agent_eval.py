@@ -22,7 +22,7 @@ R6 = "취급설명서에서 찾을 수 없는 내용입니다"
 SETUP_RE = re.compile(
     r"^(?P<item>.+),\s*(?P<day>\d{4}-\d{2}-\d{2}),\s*(?P<km>\d+)\s*km\s*$"
 )
-COLUMNS = ["id", "기대 도구", "실제 도구", "AC-8 결과", "정답 쪽", "보여 준 쪽", "AC-9 결과"]
+COLUMNS = ["id", "기대 도구", "실제 도구", "도구 선택 결과", "정답 쪽", "보여 준 쪽", "근거 쪽 결과"]
 
 
 def parse_setup(text: str | None):
@@ -102,10 +102,10 @@ def score(questions: list[dict], results: list[dict]) -> dict:
             "id": question["id"],
             "기대 도구": question.get("expected_tool", ""),
             "실제 도구": ";".join(tools),
-            "AC-8 결과": "정답" if ac8_ok else "오답",
+            "도구 선택 결과": "정답" if ac8_ok else "오답",
             "정답 쪽": question.get("answer_pages", ""),
             "보여 준 쪽": ";".join(str(page) for page in shown),
-            "AC-9 결과": ac9_label,
+            "근거 쪽 결과": ac9_label,
         })
 
     return {
@@ -132,10 +132,10 @@ def save_report(report: dict, directory: str = RESULTS_DIR, day: date | None = N
 
 def format_summary(report: dict) -> str:
     labels = [
-        ("AC-8 도구 선택", "ac8"),
-        ("AC-9 근거 쪽(하나라도)", "ac9_any"),
-        ("AC-9 근거 쪽(모두)", "ac9_all"),
-        ("AC-10 거절", "ac10"),
+        ("도구 선택 정확도", "ac8"),
+        ("근거 쪽 적중률(하나라도)", "ac9_any"),
+        ("근거 쪽 적중률(모두)", "ac9_all"),
+        ("범위 밖 질문 거절률", "ac10"),
     ]
     lines = []
     for label, key in labels:

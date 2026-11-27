@@ -56,14 +56,14 @@ def test_score_rules_with_fake_results():
     report = score(questions, results)
     by_id = {row["id"]: row for row in report["rows"]}
 
-    assert by_id["q01"]["AC-8 결과"] == "정답"
-    assert by_id["q01"]["AC-9 결과"] == "정답"
-    assert by_id["q02"]["AC-9 결과"] == "정답"  # 408만 있어도 하나라도 맞으면 정답
-    assert by_id["q08"]["AC-8 결과"] == "오답"
-    assert by_id["q08"]["AC-9 결과"] == "오답"
-    assert by_id["q13"]["AC-8 결과"] == "정답"
-    assert by_id["q14"]["AC-8 결과"] == "정답"
-    assert by_id["q15"]["AC-8 결과"] == "오답"
+    assert by_id["q01"]["도구 선택 결과"] == "정답"
+    assert by_id["q01"]["근거 쪽 결과"] == "정답"
+    assert by_id["q02"]["근거 쪽 결과"] == "정답"  # 408만 있어도 하나라도 맞으면 정답
+    assert by_id["q08"]["도구 선택 결과"] == "오답"
+    assert by_id["q08"]["근거 쪽 결과"] == "오답"
+    assert by_id["q13"]["도구 선택 결과"] == "정답"
+    assert by_id["q14"]["도구 선택 결과"] == "정답"
+    assert by_id["q15"]["도구 선택 결과"] == "오답"
     assert report["ac8"] == {"correct": 4, "total": 6, "ratio": 0.667}
     assert report["ac9_any"] == {"correct": 2, "total": 3, "ratio": 0.667}
     assert report["ac9_all"] == {"correct": 1, "total": 3, "ratio": 0.333}
