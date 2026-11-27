@@ -527,7 +527,7 @@ current = st.session_state["manual_id"]
 view = st.session_state.setdefault("view", "chat")
 
 with st.sidebar:
-    st.button("JOOYOUNG TECH", key="brand", on_click=select, args=(None,), type="tertiary",
+    st.button("CAR TECH", key="brand", on_click=select, args=(None,), type="tertiary",
               help="처음 화면으로")
     st.markdown('<p class="side-label">설명서</p>', unsafe_allow_html=True)
     for m in manuals:
